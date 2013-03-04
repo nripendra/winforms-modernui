@@ -89,6 +89,7 @@ namespace MetroFramework.Forms
         #region Fields
 
         protected MetroDropShadow metroDropShadowForm = null;
+        protected Dropshadow dropShadowForm = null;
 
         private bool isInitialized = false;
 
@@ -221,6 +222,16 @@ namespace MetroFramework.Forms
                 }
             }
 
+            if (dropShadowForm != null)
+            {
+                if (!dropShadowForm.IsDisposed)
+                {
+                    dropShadowForm.Owner = null;
+                    dropShadowForm.Dispose();
+                    dropShadowForm = null;
+                }
+            }
+
             base.Dispose(disposing);
         }
 
@@ -293,6 +304,13 @@ namespace MetroFramework.Forms
                 metroDropShadowForm = null;
             }
 
+            if (dropShadowForm != null)
+            {
+                dropShadowForm.Visible = false;
+                dropShadowForm.Owner = null;
+                dropShadowForm = null;
+            }
+
             base.OnClosing(e);
         }
 
@@ -314,8 +332,15 @@ namespace MetroFramework.Forms
         {
             base.OnLoad(e);
 
-            if (metroDropShadowForm == null && !DesignMode && hasShadow)
-                metroDropShadowForm = new MetroDropShadow(this);
+            //if (metroDropShadowForm == null && !DesignMode && hasShadow)
+            //    metroDropShadowForm = new MetroDropShadow(this);
+
+            if (dropShadowForm == null && !DesignMode && hasShadow)
+            {
+                dropShadowForm = new Dropshadow(this);
+                dropShadowForm.Show();
+            }
+            
         }
 
         protected override void OnActivated(EventArgs e)
@@ -826,6 +851,323 @@ namespace MetroFramework.Forms
             }
         }
 
+        //http://stackoverflow.com/questions/8793445/windows-7-style-dropshadow-in-borderless-form
+        /// <author>Corylulu</author>
+        protected class Dropshadow : Form
+        {
+            Form shadowTargetForm;
+            Point Offset = new Point(-15, -15);
+            bool isBringingToFront;
+            Bitmap getShadow;
+            Timer timer = new Timer();
+
+            public Dropshadow(Form parentForm)
+            {
+                shadowTargetForm = parentForm;
+
+                this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.None;
+                this.ShowInTaskbar = false;
+
+                /*This bit of code makes the form click-through. 
+                  So you can click forms that are below it in z-space */
+                uint wl = Win32.GetWindowLong(this.Handle, -20);
+                wl = wl | 0x80000 | 0x20;
+                Win32.SetWindowLong(this.Handle, -20, wl);
+
+                //Makes the start location the same as parent.
+                this.StartPosition = parentForm.StartPosition;
+
+                parentForm.Activated += ParentForm_Activated; //Fires on parent activation to do a this.BringToFront() 
+                this.Deactivate += This_Deactivated; //Toggles a boolean that ensures that ParentForm_Activated does fire when clicking through (this)
+                parentForm.Move += ParentForm_Move; //Follows movement of parent form
+                parentForm.Resize += ParentForm_Resize;
+                parentForm.ResizeEnd += ParentForm_ResizeEnd;
+
+                parentForm.Owner = this;
+
+                Bounds = GetBounds();
+
+                this.Load += Dropshadow_Load;
+                
+            }
+
+            private void Dropshadow_Load(object sendr, EventArgs e)
+            {
+                //@nrip - Avoid showing shadow while form is loading.
+                timer.Interval = 50;
+                timer.Tick += timer_Tick;
+                timer.Start();
+            }
+
+            private void timer_Tick(object sendr, EventArgs e)
+            {
+                timer.Tick -= timer_Tick;
+                timer.Stop();
+                getShadow = DrawBlurBorder();
+                SetBitmap(getShadow, 255); //Sets background as 32-bit image with full alpha.
+            }
+
+            private Rectangle GetBounds()
+            {
+                return new Rectangle((shadowTargetForm).Location.X + Offset.X, (shadowTargetForm).Location.Y + Offset.Y, shadowTargetForm.ClientRectangle.Width + Math.Abs(Offset.X * 2), shadowTargetForm.ClientRectangle.Height + Math.Abs(Offset.Y * 2));
+            }
+
+            private void ParentForm_Activated(object o, EventArgs e)
+            {
+                if (isBringingToFront)
+                {
+                    isBringingToFront = false;
+                    return;
+                }
+
+                this.BringToFront();
+            }
+
+            private void This_Deactivated(object o, EventArgs e)
+            {
+                /* Prevents recusion. */
+                isBringingToFront = true;
+            }
+
+            /* Adjust position when parent moves. */
+            private void ParentForm_Move(object o, EventArgs e)
+            {
+                if (o is Form)
+                    this.Bounds = GetBounds();
+            }
+
+            long lastResizedOn = 0;
+            private void ParentForm_Resize(object o, EventArgs e)
+            {
+                if (o is Form)
+                    this.Bounds = GetBounds();
+                //@nrip - Quick and dirty throttling.
+                long delta = DateTime.Now.Ticks - lastResizedOn;
+                if (delta > 100000)
+                {
+                    lastResizedOn = DateTime.Now.Ticks;
+                    Invalidate();
+                }
+            }
+
+            private void ParentForm_ResizeEnd(object o, EventArgs e)
+            {
+                lastResizedOn = 0;
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                getShadow = DrawBlurBorder();
+                SetBitmap(getShadow, 255); //Sets background as 32-bit image with full alpha.
+            }
+
+            //http://www.codeproject.com/Articles/1822/Per-Pixel-Alpha-Blend-in-C
+            /// <author><name>Rui Godinho Lopes</name><email>rui@ruilopes.com</email></author>
+            private void SetBitmap(Bitmap bitmap, byte opacity = 255)
+            {
+                if (bitmap.PixelFormat != System.Drawing.Imaging.PixelFormat.Format32bppArgb)
+                    throw new ApplicationException("The bitmap must be 32ppp with alpha-channel.");
+
+                // The idea of this is very simple,
+                // 1. Create a compatible DC with screen;
+                // 2. Select the bitmap with 32bpp with alpha-channel in the compatible DC;
+                // 3. Call the UpdateLayeredWindow.
+
+                IntPtr screenDc = Win32.GetDC(IntPtr.Zero);
+                IntPtr memDc = Win32.CreateCompatibleDC(screenDc);
+                IntPtr hBitmap = IntPtr.Zero;
+                IntPtr oldBitmap = IntPtr.Zero;
+
+                try
+                {
+                    hBitmap = bitmap.GetHbitmap(Color.FromArgb(0));  // grab a GDI handle from this GDI+ bitmap
+                    oldBitmap = Win32.SelectObject(memDc, hBitmap);
+
+                    Win32.Size size = new Win32.Size(bitmap.Width, bitmap.Height);
+                    Win32.Point pointSource = new Win32.Point(0, 0);
+                    Win32.Point topPos = new Win32.Point(Left, Top);
+                    Win32.BLENDFUNCTION blend = new Win32.BLENDFUNCTION();
+                    blend.BlendOp = Win32.AC_SRC_OVER;
+                    blend.BlendFlags = 0;
+                    blend.SourceConstantAlpha = opacity;
+                    blend.AlphaFormat = Win32.AC_SRC_ALPHA;
+
+                    Win32.UpdateLayeredWindow(Handle, screenDc, ref topPos, ref size, memDc, ref pointSource, 0, ref blend, Win32.ULW_ALPHA);
+                }
+                finally
+                {
+                    Win32.ReleaseDC(IntPtr.Zero, screenDc);
+                    if (hBitmap != IntPtr.Zero)
+                    {
+                        Win32.SelectObject(memDc, oldBitmap);
+                        //Windows.DeleteObject(hBitmap); // The documentation says that we have to use the Windows.DeleteObject... but since there is no such method I use the normal DeleteObject from Win32 GDI and it's working fine without any resource leak.
+                        Win32.DeleteObject(hBitmap);
+                    }
+                    Win32.DeleteDC(memDc);
+                }
+            }
+
+            private Bitmap DrawBlurBorder()
+            {
+                return (Bitmap)DrawOutsetShadow(0, 0, 40, 1, Color.Black, new Rectangle(1, 1, ClientRectangle.Width, ClientRectangle.Height));
+            }
+
+            //http://stackoverflow.com/questions/12924296/css3-like-box-shadow-implementation-algorithm
+            /// <author>Marino Šimić</author>
+            private Image DrawOutsetShadow(int hShadow, int vShadow, int blur, int spread, Color color, Rectangle shadowCanvasArea)
+            {
+                var rOuter = shadowCanvasArea;
+                var rInner = shadowCanvasArea;
+                rInner.Offset(hShadow, vShadow);
+                rInner.Inflate(-blur, -blur);
+                rOuter.Inflate(spread, spread);
+                rOuter.Offset(hShadow, vShadow);
+                var originalOuter = rOuter;
+
+                var img = new Bitmap(originalOuter.Width, originalOuter.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                var g = Graphics.FromImage(img);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+
+                var currentBlur = 0;
+                do
+                {
+                    var transparency = (rOuter.Height - rInner.Height) / (double)(blur * 2 + spread * 2);
+                    var shadowColor = Color.FromArgb(((int)(255 * (transparency * transparency))), color);
+                    var rOutput = rInner;
+                    rOutput.Offset(-originalOuter.Left, -originalOuter.Top);
+
+                    DrawRoundedRectangle(g, rOutput, currentBlur, Pens.Transparent, shadowColor);
+                    rInner.Inflate(1, 1);
+                    currentBlur = (int)((double)blur * (1 - (transparency * transparency)));
+                } while (rOuter.Contains(rInner));
+
+                g.Flush();
+                g.Dispose();
+
+                return img;
+            }
+
+            private void DrawRoundedRectangle(Graphics gfx, Rectangle bounds, int cornerRadius, Pen drawPen, Color fillColor)
+            {
+                int strokeOffset = Convert.ToInt32(Math.Ceiling(drawPen.Width));
+                bounds = Rectangle.Inflate(bounds, -strokeOffset, -strokeOffset);
+
+                var gfxPath = new System.Drawing.Drawing2D.GraphicsPath();
+                if (cornerRadius > 0)
+                {
+                    gfxPath.AddArc(bounds.X, bounds.Y, cornerRadius, cornerRadius, 180, 90);
+                    gfxPath.AddArc(bounds.X + bounds.Width - cornerRadius, bounds.Y, cornerRadius, cornerRadius, 270, 90);
+                    gfxPath.AddArc(bounds.X + bounds.Width - cornerRadius, bounds.Y + bounds.Height - cornerRadius, cornerRadius,
+                                   cornerRadius, 0, 90);
+                    gfxPath.AddArc(bounds.X, bounds.Y + bounds.Height - cornerRadius, cornerRadius, cornerRadius, 90, 90);
+                }
+                else
+                {
+                    gfxPath.AddRectangle(bounds);
+                }
+                gfxPath.CloseAllFigures();
+
+                if (cornerRadius > 5)
+                {
+                    gfx.FillPath(new SolidBrush(fillColor), gfxPath);
+                }
+                if (drawPen != Pens.Transparent)
+                {
+                    var pen = new Pen(drawPen.Color);
+                    pen.EndCap = pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                    gfx.DrawPath(pen, gfxPath);
+                }
+            }
+
+            #region native win32 helpers, probably should be merged into WinApi class
+            class Win32
+            {
+                public enum Bool
+                {
+                    False = 0,
+                    True
+                };
+
+
+                [StructLayout(LayoutKind.Sequential)]
+                public struct Point
+                {
+                    public Int32 x;
+                    public Int32 y;
+
+                    public Point(Int32 x, Int32 y) { this.x = x; this.y = y; }
+                }
+
+
+                [StructLayout(LayoutKind.Sequential)]
+                public struct Size
+                {
+                    public Int32 cx;
+                    public Int32 cy;
+
+                    public Size(Int32 cx, Int32 cy) { this.cx = cx; this.cy = cy; }
+                }
+
+
+                [StructLayout(LayoutKind.Sequential, Pack = 1)]
+                struct ARGB
+                {
+                    public byte Blue;
+                    public byte Green;
+                    public byte Red;
+                    public byte Alpha;
+                }
+
+
+                [StructLayout(LayoutKind.Sequential, Pack = 1)]
+                public struct BLENDFUNCTION
+                {
+                    public byte BlendOp;
+                    public byte BlendFlags;
+                    public byte SourceConstantAlpha;
+                    public byte AlphaFormat;
+                }
+
+
+                public const Int32 ULW_COLORKEY = 0x00000001;
+                public const Int32 ULW_ALPHA = 0x00000002;
+                public const Int32 ULW_OPAQUE = 0x00000004;
+
+                public const byte AC_SRC_OVER = 0x00;
+                public const byte AC_SRC_ALPHA = 0x01;
+
+
+                [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+                public static extern Bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref Point pptDst, ref Size psize, IntPtr hdcSrc, ref Point pprSrc, Int32 crKey, ref BLENDFUNCTION pblend, Int32 dwFlags);
+
+                [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+                public static extern IntPtr GetDC(IntPtr hWnd);
+
+                [DllImport("user32.dll", ExactSpelling = true)]
+                public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+                [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+                public static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+                [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+                public static extern Bool DeleteDC(IntPtr hdc);
+
+                [DllImport("gdi32.dll", ExactSpelling = true)]
+                public static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+
+                [DllImport("gdi32.dll", ExactSpelling = true, SetLastError = true)]
+                public static extern Bool DeleteObject(IntPtr hObject);
+
+                [DllImport("user32.dll", SetLastError = true)]
+                public static extern UInt32 GetWindowLong(IntPtr hWnd, int nIndex);
+
+                [DllImport("user32.dll")]
+                public static extern int SetWindowLong(IntPtr hWnd, int nIndex, UInt32 dwNewLong);
+            }
+            #endregion
+        }
         #endregion
 
         #region Helper methods
